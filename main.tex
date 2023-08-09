@@ -1,0 +1,848 @@
+\input{preambule}
+\begin{document}
+\input{metadata}
+
+\begin{abstract}
+  This report explores two alternatives to GEB for Juvix-to-VampIR
+  compilation. The first alternative is a straightforward approach
+  based on full normalization, which may be implemented relatively
+  quickly and used as a comparison baseline for all other
+  approaches. The second alternative is based on a pipeline of several
+  compiler transformations which together convert Juvix programs into 
+  a form that can be directly translated to VampIR input.
+\end{abstract}
+
+\begin{keywords}
+Vamp-IR, GEB, normalization
+\end{keywords}
+\maketitle
+
+\section{Introduction}\label{sec_introduction}
+
+VampIR is a proof-system-agnostic language for writing arithmetic
+circuits. Juvix targets VampIR as one of its backends, currently
+through an external GEB-to-VampIR compiler. Juvix programs are first
+translated into the JuvixCore language and then transformed in a
+series of steps into a form which can be directly translated to GEB.
+
+This report describes two possible alternative Juvix-to-VampIR
+compilation approaches which do not depend on GEB.
+\begin{enumerate}
+\item Normalization approach (Section~\ref{sec_normalization}).
+
+   Relatively easy to implement. Perhaps the most straightforward
+   approach possible. Could serve as a baseline comparison for other
+   approaches and the quickest way to get a working Juvix-to-VampIR
+   compiler, but suffers from the (super-)exponential blow-up problem.
+\item Transformation pipeline (Section~\ref{sec_pipeline}).
+
+  Based on a pipeline of traditional compiler transformations which
+  together convert JuvixCore programs into a form that can be directly
+  translated to VampIR. A crucial transformation is that of
+  defunctionalisation which removes higher-order functions (see
+  Appendix~\ref{sec_defunctionalisation}). The pipeline is more robust
+  than the normalization approach, but more time-consuming to
+  implement. It is more efficient than unoptimized GEB, but less
+  general and harder to extend.
+\end{enumerate}
+
+The conclusion of this report is the recommendation to implement the
+normalization approach in order to have a first working version of
+Juvix-to-VampIR compilation and a simple baseline compilation strategy
+against which other approaches can be compared. The transformation
+pipeline from Section~\ref{sec_pipeline} can be considered as an
+``emergency'' alternative approach in case of significant unforeseen
+issues with GEB in the future.
+
+In the rest of this report, I first present a brief overview of the
+features supported by Juvix, JuvixCore, GEB (current version) and
+VampIR (Section~\ref{sec_features}). Then I discuss the fundamental
+(super-)exponential blow-up problem for highly-branching programs and
+its implications for any compilation strategy
+(Section~\ref{sec_branching}). In Section~\ref{sec_geb}, I discuss the
+issues with and limitations of the current implementation
+of~GEB. Sections~\ref{sec_normalization} and~\ref{sec_pipeline}
+describe the normalization approach and the proposed transformation
+pipeline. Section~\ref{sec_comparison} presents a comparison of the
+two approaches with GEB and each other. Section~\ref{sec_conclusion}
+contains some recommendations together with their justifications. The
+appendices contain technical details relevant to the normalization
+approach (Appendix~\ref{sec_normal_forms}) and the transformation
+pipeline (Appendix~\ref{sec_transformations}), and discussions of a
+few more tangential technical issues (Appendix~\ref{sec_issues}).
+
+{\bf Update:} As of Juvix version 0.3.5, the normalization approach
+has been implemented. It exhibits the limitations predicted in this
+report with regard to compiling highly-branching programs. The report
+has been slightly updated to reflect the current state of the
+normalization approach implementation and of GEB.
+
+\section{Language features overview}\label{sec_features}
+
+The following table provides an overview of language features
+supported by Juvix, JuvixCore, current GEB and VampIR.
+
+\vspace*{2mm}
+\begin{minipage}[b]{\hsize}\centering
+% \caption{Language features}
+\begin{tabular}{lllll}
+\hline
+\textbf{Feature} & \textbf{Juvix} & \textbf{JuvixCore} & \textbf{GEB} & \textbf{VampIR} \\ \hline
+General recursion (functions)   &  Yes   &  Yes   &  No  &   No  \\
+First-class functions   &  Yes   &  Yes   &  Yes  &   No\footnote{VampIR higher-order and anonymous functions are not fully ``first-class'' because they cannot non-trivially interact with the field elements - they are essentially compilation-time-only.}  \\
+Inductive data types  &  Yes   &  Yes   &  No  &   No  \\
+Finite data structures  &  Yes   &  Yes   &  Yes\footnote{Encodable via products and coproducts.} & No\footnote{Pairs and lists in VampIR cannot non-trivially interact with the field elements. In general, finite JuvixCore data structures cannot be translated to them.}  \\
+Prenex polymorphism  &  Yes   &  Yes   &  No  &  No\footnote{Polymorphic functions are supported, but not polymorphic data types which can interact non-trivially with field elements. Hence, monomorphisation is still necessary to translate from JuvixCore.} \\
+Higher-rank polymorphism  &  Some   &  Yes   &  No  &   No  \\
+Primitive integer type  &  Yes   &  Yes   &  No  &   Yes\footnote{VampIR ``integers'' are the field elements, not integers strictly speaking.} \\
+Runtime error reporting  &  Yes   &  Yes   &  No  &   No \\
+\hline
+\end{tabular}
+\end{minipage}
+
+\section{Current state of the GEB implementation}\label{sec_geb}
+
+Currently, GEB lacks the following features necessary for Juvix
+integration.
+\begin{itemize}
+\item Primitive integers and arithmetic operations (critical).
+\item Bounded algebraic datatype support (needed for recursive data structures).
+\item Polymorphism (Juvix could alternatively implement monomorphisation).
+\end{itemize}
+These features are currently being worked on by the GEB team.
+
+\section{The branching problem}\label{sec_branching}
+
+Compiling highly-branching functional programs to circuits may result
+in (super-)exponential circuit size blow-up. This branching problem is
+a fundamental limitation on any direct non-interpretive compilation
+strategy. The problem is that circuits directly encode all possible
+computation paths.
+
+With the proposed pipeline, Juvix programs would be translated to
+VampIR programs with the increase in the program size only by a factor
+polynomial in the unrolling depth limit. However, to compile the
+generated programs to circuits, VampIR needs to essentially ``paste
+in'' the bodies of functions at all call sites, which can lead to
+circuits (super-)exponential in the size of the VampIR input
+program. The recursive inlining performed by VampIR essentially
+amounts to full normalization with the sharing of common normal
+subexpressions of type integer.
+
+The branching problem occurs in particular with recursive functions
+which have more than one recursive function call occurrence in the
+body. For example, the \texttt{filter} function
+
+\begin{minted}{haskell}
+  filter : (a -> Bool) -> List a -> List a
+  filter p Nil = Nil
+  filter p (Cons x xs) = if p x then Cons x (filter p xs) else filter p xs
+\end{minted}
+would be fully recursively ``unfolded'' up to the specified recursion
+depth limit, with each recursive call unfolded separately, resulting
+in circuit size exponential in the recursion depth limit. In this
+example, the blow-up could be avoided by hoisting the common
+subexpression \texttt{filter p xs}, i.e.
+\begin{minted}{haskell}
+  filter p (Cons x xs) =
+    let xs' = filter p xs
+    in if p x then Cons x xs' else xs'
+\end{minted}
+However, this is not always possible if there are two or more
+recursive calls with essentially different arguments.
+
+Fortunately, there is a large class of functional programs that can be
+guaranteed to not cause an exponential blow-up (assuming the circuits
+are DAGs not trees): those which use recursion linearly, i.e., for
+which there is only one recursive call occurrence in each function
+body. Note that folds over non-branching data structures (e.g.~lists)
+fall into this category. In fact, the class of functions definable
+with linear recursion is quite large (though it might be difficult or
+inconvenient to reformulate programs into this format). All primitive
+recursive functions on natural numbers are definable with first-order
+linear recursion.
+
+For first-order linearly recursive programs, the size of the final
+circuit DAG should be at most proportional to the program size
+multiplied by a factor polynomial in the recursion unrolling depth
+limit, with the degree of the polynomial depending on the number of
+functions in the program source.
+
+For higher-order linearly recursive programs, to guarantee the lack of
+blow-up one also needs to require that functions provided as arguments
+to higher-order recursive functions are themselves not recursive.
+
+With the normalization approach discussed in the next section, one
+also needs to restrict recursion to natural numbers only.
+
+\section{The normalization approach}\label{sec_normalization}
+
+It is a simple lambda-calculus exercise to prove that any closed
+JuvixCore normal-form lambda-term~$t$ of type $\mathrm{Int} \to \ldots
+\to \mathrm{Int} \to \mathrm{Int}$ must have the form $t = \lambda x_1
+\ldots x_n . b$ where $b$ is an expression built up from:
+\begin{itemize}
+\item the variables $x_1,\ldots,x_n$,
+\item number literals,
+\item arithmetic operations and comparisons,
+\item if-then-else,
+\item runtime errors.
+\end{itemize}
+See Appendix~\ref{sec_normal_forms} for a more detailed
+analysis. After removing the error nodes, any lambda-term in such a form
+can be directly translated to VampIR.
+
+This suggests a straightforward compilation strategy with two main
+steps:
+\begin{enumerate}
+\item Unrolling of recursive functions (already implemented).
+\item Normalization (partly implemented).
+\end{enumerate}
+Once recursion is unrolled, all typed terms are strongly normalizing
+and normalization can be performed without looping. After
+normalization, runtime error nodes need to be removed, but this is low
+effort (see Appendix~\ref{sec_errors}).
+
+For normalization to work on anything but the tiniest toy programs one
+needs to use the Normalization by Evaluation (NbE)
+technique.\footnote{The difference between evaluation and
+normalization is that evaluation does not reduce under binders, e.g.,
+$\lambda x . (\lambda y . y) x$ is a value but not a normal
+form. Evaluation is what mainstream functional programming languages
+do (Haskell, OCaml, Lisp, \ldots). Normalization is what
+dependently-typed proof assistants do (Coq, Agda, Idris, \ldots).} One
+also needs to take care to propagate ``stuck'' runtime error
+nodes\footnote{E.g.~reducing $(\mathrm{if}\,\mathrm{error}\,M\,N)$ to
+$\mathrm{error}$.} and share common normal subexpressions of
+type~$\mathrm{Int}$ using lets. Implementing NbE with these
+modifications is more involved than a naive repetition of
+$\beta\iota$-reductions. The implementation effort
+is still much smaller than for the remaining parts of the pipeline
+from Section~\ref{sec_pipeline}.
+
+The problem with the normalization approach is that normalizing a
+(simply-typed) lambda-term may increase its size
+super-exponentially. In fact, the blow-up may be non-elementary, i.e.,
+the size of the output may be greater than
+\[
+2^{2^{2^{\vdots^{2^n}}}}
+\]
+for any tower of~$2$s, where~$n$ is the size of the original
+term.
+
+Naive normalization without sharing of subexpressions of
+type~$\mathrm{Int}$ may blow up the program size even for numeric first-order
+linearly recursive programs. For example, normalising the $n$-times
+composition of $\lambda x . f x x$ results in a normal form of size
+exponential in~$n$. A remedy is to reduce $(\lambda x . t) s$ to
+$\mathrm{let}\,x:=s\,\mathrm{in}\,t$ when~$s$ is a non-constant normal
+form of type~$\mathrm{Int}$. After normalization, the lets need to be
+hoisted (see Appendix~\ref{sec_let_hoisting}).
+
+If normalization is implemented to share subexpressions of
+type~$\mathrm{Int}$, it can be guaranteed that numeric first-order
+linearly recursive programs do not cause an exponential
+blow-up. Non-linearly recursive programs may still increase in size
+super-exponentially.
+
+Unfortunately, it is not possible to use the trick with lets for
+recursion on non-numeric data types. First-order linearly recursive
+programs recursing on data structures other than natural numbers or
+integers may still cause a super-exponential blow-up.
+
+However, if we ultimately target circuits, whenever this blow-up has
+to happen, if it doesn't happen during Juvix-to-VampIR compilation, it
+may happen when VampIR tries to generate the final circuit. VampIR
+needs to essentially fully inline all functions, which amounts to full
+normalization (with sharing of common normal subexpressions of
+type~$\mathrm{Int}$). With the pipeline from
+Section~\ref{sec_pipeline} the blow-up is delayed until VampIR
+generates the circuit. With the normalization approach it already
+happens when compiling Juvix to VampIR.
+
+Nonetheless, it is a major disadvantage that the (super-)exponential
+blow-up happens already when compiling to VampIR, which might make it
+impossible in practice to generate any VampIR input at all. This would
+prevent VampIR from optimizing the programs in the particular special
+cases when the blow-up could be avoided. Also, if parts of the circuit
+programs are to be ultimately interpreted in a VM, then the right
+VM/interpreter code format is probably closer to GEB/VampIR than to
+the initial JuvixCore without further transformations.
+
+\section{The transformation pipeline}\label{sec_pipeline}
+
+The proposed pipeline for compiling Juvix to VampIR directly, without
+going through GEB, consists of several JuvixCore transformations which
+together convert a JuvixCore program into a form that can be
+straightforwardly translated into the input format of VampIR. The
+transformations remove step-by-step the features of JuvixCore not
+supported by VampIR (see Section~\ref{sec_features}).
+\begin{enumerate}
+\item Lambda-lifting (already implemented).
+  {\small
+  \begin{itemize}
+  \item Removes anonymous lambda-abstractions by converting them into
+    top-level named function definitions.
+  \end{itemize} }
+\item Monomorphisation (necessary for polymorphism).
+  {\small
+    \begin{itemize}
+    \item Instantiates all type parameters in functions and datatypes with concrete types.
+  \end{itemize} }
+\item Defunctionalisation.
+  {\small
+    \begin{itemize}
+    \item Removes higher-order functions.
+  \end{itemize} }
+\item Unrolling of recursive functions (already implemented).
+  {\small
+    \begin{itemize}
+    \item Unrolls recursion up to some specified depth.
+  \end{itemize} }
+\item Hoisting of lets.
+  {\small
+    \begin{itemize}
+    \item Moves lets upwards, out of applications.
+  \end{itemize} }
+\item Encoding of datatypes.
+  {\small
+    \begin{itemize}
+    \item Encodes datatypes into tuples of numbers.
+  \end{itemize} }
+\item Encoding of runtime errors.
+  {\small
+    \begin{itemize}
+    \item Encodes runtime errors with pairs.
+  \end{itemize} }
+\end{enumerate}
+See Appendix~\ref{sec_transformations} for more detailed descriptions
+of the transformations.
+
+After performing the above transformations, we are left with a
+collection of non-recursive first-order function definitions of the
+form
+\begin{minted}{ocaml}
+  fun f x1 ... xn =
+    let y1 = v1
+        ...
+        ym = vm
+    in
+    v
+\end{minted}
+where $x_1,\ldots,x_n,y_1,\ldots,y_m$ have the types of numbers or
+tuples of numbers, and $v_1,\ldots,v_m,v$ are applicative
+expressions built from:
+\begin{itemize}
+\item variables,
+\item number literals,
+\item fully applied functions,
+\item arithmetic operations and comparisons,
+\item tuple operations (tuple creation and destruction).
+\end{itemize}
+Any definition of this form can be directly translated to a VampIR
+function definition. VampIR supports local definitions, arithmetic and
+tuples (at circuit generation time).
+
+\section{Comparison}\label{sec_comparison}
+
+\subsection{Efficiency}
+
+The proposed pipeline relies on traditional compiler transformations
+to convert Juvix programs into a form that can be straightforwardly
+translated to VampIR. The transformations are ``syntactic'' and
+relatively ``low-level''. Such an approach might give better control
+over the details of the generated VampIR code and make it easier to
+generate efficient VampIR code (which can be compiled to
+smaller/``faster'' circuits). The code generated with the proposed
+transformation pipeline should be reasonably efficient without further
+optimizations.
+
+The normalization approach essentially ``fully inlines'' the program
+by normalizing it. This may result in super-exponential blow-up at
+compilation stage and thus failure to compile. But the code that does
+compile without blow-up should be reasonably efficient.
+
+GEB's efficiency improved since the first version of this report, but
+it is still missing some features to allow for compilation from Juvix
+and a thorough comparison.
+
+\subsection{Generality}
+
+GEB is more abstract and general, which in the long term might make it
+more amenable to modular, structured extensions and to formal
+verification. For example, according to Terence supporting higher-rank
+polymorphism is not problematic. With the proposed pipeline, it is not
+clear how to handle higher-rank polymorphism. Also, adding support for
+dependent types may be more challenging with the proposed pipeline
+than with~GEB.
+
+\subsection{The branching problem}
+
+The GEB approach, in the long run, might be better suited to address
+the branching problem. Interpreting (parts of) the programs might
+avoid circuit size blow-up, at the cost of significant interpretation
+overhead. I'm not sure to what extent the current version of GEB
+avoids the branching problem.
+
+\section{Conclusion}\label{sec_conclusion}
+
+I recommend the following.
+\begin{enumerate}
+\item Regardless of any other choices, implement the normalization
+  approach from Section~\ref{sec_normalization} as a reference
+  baseline.
+  \medskip
+
+  Justification:
+  \begin{itemize}
+  \item The normalization approach is perhaps the most straightforward
+    compilation method possible for Juvix-to-VampIR. It can serve as a
+    comparison baseline for more sophisticated methods.
+  \item The normalization approach can be implemented relatively
+    quickly -- should be doable till about the beginning of June.
+  \item Implementing the normalization approach will give the GEB team
+    more time to design the incorporation of the features needed by
+    Juvix in a structured, modular manner.
+  \end{itemize}
+\item Continue the work on GEB. In case of significant unexpected
+  difficulties with the GEB approach, implementing the pipeline from
+  Section~\ref{sec_pipeline} could be considered.
+  \medskip
+
+  Justification:
+  \begin{itemize}
+  \item GEB is more general than the proposed pipeline, which in the
+    long term may make it easier to extend it with higher-rank
+    polymorphism, dependent types or other features. Potential
+    formalization might also be easier.
+  \item GEB might make it easier to solve the branching problem.
+  \end{itemize}
+\end{enumerate}
+
+
+\clearpage
+\appendix
+
+\renewcommand{\thesection}{\Alph{section}}
+
+\section{Analysis of normal forms}\label{sec_normal_forms}
+
+We consider the problem of compiling a Juvix program with the main
+function of type $\mathrm{Int} \to \mathrm{Int}$ into a one-argument
+VampIR function~$f$. One would then use this function e.g.~in a VampIR
+equation $f x = y$ with the input variables $x,y$.
+
+A generalisation to multiple arguments of type $\mathrm{Int}$ is
+straightforward. To handle first-order algeraic data types as the
+arguments/result of the main function, one needs to specify how to
+encode them into (tuples of) numbers.
+
+Note that we restrict only the type of the main function. Other parts
+of the program can use arbitrary types, be polymorphic, higher-order,
+etc.
+
+We consider an extended polymorphic lambda calculus without recursion
+which essentially corresponds to JuvixCore after compilation of
+pattern matching and the unrolling of recursion. For the sake of
+brevity, we omit some features of JuvixCore (if-then-else, errors) but
+the analysis extends to them.
+
+\medskip
+
+\noindent The types $\tau,\sigma$ are:
+\begin{itemize}
+\item primitive integer type $\mathrm{Int}$,
+\item type variables $\alpha,\beta$,
+\item parameterised inductive types $I \tau_1 \ldots \tau_n$,
+\item function types $\tau \to \sigma$,
+\item type quantification $\forall \alpha . \tau$.
+\end{itemize}
+The terms $t,s,r$ are:
+\begin{itemize}
+\item integer literals $n, m$,
+\item arithmetic operations $t \odot s$ where $\odot \in \{ {+}, {-}, {*}, {/} \}$,
+\item variables $x,y$,
+\item application $t s$,
+\item lambda-abstraction $\lambda x : \tau . t$,
+\item type application $t \tau$,
+\item type abstraction $\Lambda \alpha . t$,
+\item inductive type constructors $c$,
+\item case-expressions: $\mathrm{case}\,t\,\mathrm{of}\,\{ c_i x_1 \ldots x_{k_i} \To t_i \mid i = 1,\ldots,n\}$.
+\end{itemize}
+The reductions are:
+\[
+\begin{array}{c}
+  (\lambda x : \tau . t) s \to_\beta t[x := s]\\
+  (\Lambda \alpha . t) \tau \to_\beta t[\alpha := \tau]\\
+  \mathrm{case}\,c_m s_1 \ldots s_{k_m}\,\mathrm{of}\,\{ c_i x_1 \ldots x_{k_i} \To t_i \mid i = 1,\ldots,n\} \to_\iota t_m[x_1 := s_1,\ldots,x_{k_m} := s_{k_m}]
+\end{array}
+\]
+I omit the standard typing rules. The arithmetic operations
+have type $\odot : \mathrm{Int} \to \mathrm{Int} \to \mathrm{Int}$.
+
+\begin{lemma}
+  Any closed (i.e.~without free variables) $\beta\iota$-normal term
+  $t$ of type $\mathrm{Int} \to \mathrm{Int}$ must have the form $t =
+  \lambda x : \mathrm{Int} . s$ where $s$ is a $\beta\iota$-normal
+  term of type $\mathrm{Int}$ built up from:
+  \begin{itemize}
+  \item the variable $x$,
+  \item integer literals $n, m$,
+  \item arithmetic operations $\odot$.
+  \end{itemize}
+\end{lemma}
+
+\begin{proof}
+  This is an easy lambda-calculus exercise in normal form
+  analysis. Because $t : \mathrm{Int} \to \mathrm{Int}$ is
+  $\beta\iota$-normal and closed, it must be a lambda-abstraction
+  $\lambda x : \mathrm{Int} . s$ with $s : \mathrm{Int}$ also
+  $\beta\iota$-normal and $\FV(s) = \{x\}$. Then one proves by
+  induction on the size of $\beta\iota$-normal $s : \mathrm{Int}$ with
+  $\FV(s) = \{x\}$ that~$s$ has the required shape. The crucial
+  observation is that if~$s$ is an application $s = h s_1 \ldots s_m$
+  then $h$ cannot be a lambda-abstraction (because $s$ is
+  $\beta$-normal), so it must be an arithmetic operation (because
+  there are no other terms available having a function type with
+  target~$\mathrm{Int}$). To exclude the possibility that~$s$ (or~$h$
+  or~$t$ above) is a case-expression, one also needs to show by
+  induction on $\beta\iota$-normal $r : I \tau_1 \ldots \tau_m$ with
+  $\FV(r) = \{x\}$ that $r = c r_1 \ldots r_n$ for some constructor~$c$
+  of~$I$.
+\end{proof}
+
+Any term in the form specified by the above lemma can be directly
+translated into a VampIR function definition.
+
+\clearpage
+\section{Pipeline transformations}\label{sec_transformations}
+
+In this appendix, I describe in more detail the transformations for
+the pipeline proposed in Section~\ref{sec_pipeline}.
+
+\subsection{Lambda-lifting}
+
+\begin{itemize}
+\item {\bf Necessity:} required
+\item {\bf Workload:} already implemented
+\end{itemize}
+
+\noindent Lambda-lifting removes anonymous lambda-abstractions by converting
+them into top-level named function definitions.
+
+\medskip
+
+\noindent For example,
+\begin{minted}{haskell}
+  f y z = map (\x -> x + y) z
+\end{minted}
+is transformed into
+\begin{minted}{haskell}
+  lam y x = x + y
+  f y z = map (lam y) z
+\end{minted}
+This transformation has already been implemented for the WebAssembly pipeline.
+
+\subsection{Monomorphisation}
+
+\begin{itemize}
+\item {\bf Necessity:} required for polymorphism
+\item {\bf Workload:} medium
+\end{itemize}
+
+\noindent Monomorphisation instantiates all type parameters in
+functions and datatypes with concrete types.
+
+\medskip
+
+\noindent For example,
+\begin{minted}{haskell}
+  data List a = Nil | Cons a (List a)
+
+  map : (a -> b) -> List a -> List b
+  map f Nil = Nil
+  map f (Cons x xs) = Cons (f x) (map f xs)
+\end{minted}
+is transformed into
+\begin{minted}{haskell}
+  data List_Nat = Nil_Nat | Cons_Nat Nat List_Nat
+  data List_String = Nil_String | Cons_String String List_String
+
+  map_Nat_Nat : (Nat -> Nat) -> List_Nat -> List_Nat
+  map_Nat_Nat f Nil_Nat = Nil_Nat
+  map_Nat_Nat f (Cons_Nat x xs) = Cons_Nat (f x) (map_Nat_Nat f xs)
+
+  map_String_Nat : (String -> Nat) -> List_String -> List_Nat
+  map_String_Nat f Nil_String = Nil_Nat
+  map_String_Nat f (Cons_String x xs) = Cons_Nat (f x) (map_String_Nat f xs)
+\end{minted}
+provided that \texttt{map} occurs in the program with $a = b =
+\mathrm{Nat}$ and with $a = \mathrm{String}, b = \mathrm{Nat}$.
+
+\medskip
+
+Note that not all Juvix programs can be monomorphised, because Juvix
+supports some higher-rank polymorphism. For example, the following is
+a valid Juvix definition
+\begin{minted}{agda}
+f : {A : Type} -> ({B : Type} -> B -> B) -> A -> A;
+f x := x x;
+\end{minted}
+It is not possible to (directly) monomorphise \texttt{f} because
+$\lambda x . x x$ is not simply-typable.
+
+With this approach, any program with non-monomorphisable higher-rank
+polymorphism would cause a compilation error. One could also consider
+a more general approach to monomorphisation, which would duplicate the
+higher-rank polymorphic function arguments and move the type
+quantifiers to the top, e.g., first changing the above \texttt{f} to
+\begin{minted}{agda}
+f : {A B C : Type} -> (B -> B) -> (C -> C) -> A -> A;
+f x1 x2 := x1 x2;
+\end{minted}
+and adjusting all call sites appropriately. I'm not sure if this works
+in full generality, but probably not.
+
+From what Terence told me, higher-rank polymorphism is not a problem
+for GEB, in principle. It is expected that GEB will support
+higher-rank polymorphism in the future.
+
+\subsection{Defunctionalisation}\label{sec_defunctionalisation}
+
+\begin{itemize}
+\item {\bf Necessity:} required
+\item {\bf Workload:} medium
+\end{itemize}
+
+\noindent Defunctionalisation removes higher-order functions by
+representing them as data structures and encoding unknown function
+applications as case distinctions on this data structure.
+
+\medskip
+
+\noindent For example,
+\begin{minted}{haskell}
+  map : (Nat -> Nat) -> List Nat -> List Nat
+  map f Nil = Nil
+  map f (Cons x xs) = Cons (f x) (map f xs)
+
+  z = map (g 0) (map f xs)
+\end{minted}
+is transformed into
+\begin{minted}{haskell}
+  data Fun_Nat_Nat = F | G Nat
+
+  app_Nat_Nat : Fun_Nat_Nat -> Nat -> Nat
+  app_Nat_Nat F x = f x
+  app_Nat_Nat (G x) y = g x y
+
+  map : Fun_Nat_Nat -> List Nat -> List Nat
+  map f Nil = Nil
+  map f (Cons x xs) = Cons (app_Nat_Nat f x) (map f xs)
+
+  z = map (G 0) (map F xs)
+\end{minted}
+assuming that \texttt{f}, \texttt{g} are the only functions in the
+entire program which occur as the head of a partial application of
+type \mintinline{haskell}{Nat -> Nat}.
+
+Note that, in general, one cannot use VampIR higher-order functions to
+encode Juvix higher-order functions, because VampIR higher-order
+functions are compile-time only and they cannot interact non-trivially
+with the field elements. Thus they cannot be, e.g., directly stored in
+a data structure encoded as a tuple of field elements.
+
+In many cases, one could optimize by using VampIR higher-order
+functions instead of defunctionalising, but not in general. In terms
+of the effect on the final circuit, however, this seems equivalent to
+doing the specialization optimization on the JuvixCore level
+(i.e.~duplicating the higher-order functions with each known function
+argument ``pasted in''). The downside of this optimization is that it
+might result in program/circuit size blow-up (see also
+Sections~\ref{sec_branching},\ref{sec_normalization}). It should
+probably be performed only selectively.
+
+\subsection{Unrolling of recursive functions}
+
+\begin{itemize}
+\item {\bf Necessity:} required for recursion
+\item {\bf Workload:} already implemented
+\end{itemize}
+
+\noindent Unrolls recursion up to some specified depth.
+
+\medskip
+
+\noindent For example,
+\begin{minted}{haskell}
+  fact x = if x == 0 then 1 else x * fact (x - 1)
+\end{minted}
+is transformed into
+\begin{minted}{haskell}
+  fact0 x = error "recursion too deep"
+  fact1 x = if x == 0 then 1 else x * fact0 (x - 1)
+  fact2 x = if x == 0 then 1 else x * fact1 (x - 1)
+  fact3 x = if x == 0 then 1 else x * fact2 (x - 1)
+  ...
+  fact{D} x = if x == 0 then 1 else x * fact{D-1} (x - 1)
+  fact x = fact{D} x
+\end{minted}
+This transformation has already been implemented for the GEB pipeline.
+
+\subsection{Hoisting of lets}\label{sec_let_hoisting}
+
+\begin{itemize}
+\item {\bf Necessity:} required
+\item {\bf Workload:} low
+\end{itemize}
+
+\noindent Hoisting of lets moves lets upwards, out of applications and
+other subexpressions.
+
+\medskip
+
+\noindent For example,
+\begin{minted}{haskell}
+  f (let x = let z = g a in z + 2 in x * b)
+\end{minted}
+is transformed into
+\begin{minted}{haskell}
+  let z = g a
+  in
+  let x = z + 2
+  in
+  f (x * b)
+\end{minted}
+
+\subsection{Encoding of datatypes}
+
+\begin{itemize}
+\item {\bf Necessity:} required
+\item {\bf Workload:} medium
+\end{itemize}
+
+Elements of each datatype (i.e.~the constructors) need to be encoded
+into (tuples of) numbers (field elements). Any unambiguous bit
+encoding of constructors can be used. For example,
+\begin{itemize}
+\item the first 8 bits for the constructor tag (indicating which
+  constructor),
+\item the next 16 bits for the size of the encoded constructor,
+\item the remaining bits for the encodings of constructor arguments in
+  the order from left to right.
+\end{itemize}
+Note that after defunctionalisation all data types are first-order, so
+every constructor argument is itself a constructor or a field
+element. For finite bounded datatypes, the maximum number of bits
+needed for the encoding can be calculated at compile time. If the
+number of bits needed exceeds the number of bits available in a field
+element, then we use an appropriate tuple of field elements. For
+unbounded datatypes, one needs to set some bound on the depth of the
+data structure and calculate the number of bits based on that. Pattern
+matching on data types is then encoded by appropriate arithmetic and
+tuple operations.
+
+For finite datatypes which are not too deep, a simpler and more
+readable encoding by nested tuples can be used. Let~$n$ be the maximum
+number of constructor arguments in any inductive type in the entire
+program. Then a constructor with~$k$ arguments is encoded by an
+$n+1$-tuple where:
+\begin{itemize}
+\item the first element is the tag,
+\item the next $k$ elements are the encodings of the constructor arguments,
+\item the remaining $n - k$ elements are arbitrary elements of
+  appropriate tuples (they're irrelevant since they'll never be
+  accessed).
+\end{itemize}
+For the types to match, any integer constructor argument must also be
+encodable as an $n+1$-tuple, e.g., by encoding it in the tag
+field.
+
+The nested-tuple encoding is a bit simpler but not very efficient with
+datatypes of depth more than two or three.
+
+\subsection{Encoding of runtime errors}\label{sec_errors}
+
+\begin{itemize}
+\item {\bf Necessity:} required
+\item {\bf Workload:} low
+\end{itemize}
+
+\noindent Runtime errors need to be encoded, e.g., using pairs.
+
+\medskip
+
+\noindent For example,
+\begin{minted}{haskell}
+  f : Int -> Int
+  f x = if x == 0 then error "Runtime error" else x - 1
+\end{minted}
+is transformed into
+\begin{minted}{haskell}
+  f : (Int, Int) -> (Int, Int)
+  f (1, x) = (1, x)
+  f (0, x) = if x == 0 then (1, 0) else (0, x - 1)
+\end{minted}
+where the first component of the pair indicates whether a runtime
+error occurred.
+
+\clearpage
+\section{Other technical issues}\label{sec_issues}
+
+\subsection{Recursion unrolling before defunctionalisation}
+
+Unrolling recursion without defunctionalising first may result in
+counterintuitive effective recursion depth limit. This is because with
+higher-order functions one can ``cheat'' the recursion depth
+limit. For instance, consider the following Juvix program:
+\begin{minted}{agda}
+iterate : {A : Type} → (A → A) → Nat → A → A;
+iterate f zero x := x;
+iterate f (suc n) x := f (iterate f n x);
+
+plus : Nat → Nat → Nat;
+plus := iterate suc;
+
+mult : Nat → Nat → Nat;
+mult m n := iterate (plus n) m 0;
+
+exp : Nat → Nat → Nat;
+exp m n := iterate (mult m) n 1;
+\end{minted}
+If one unrolls \texttt{iterate} up to depth~$k$ without
+defunctionalising (i.e.~independently of its function argument), then
+the effective recursion depth limit for the entire program (and the
+size of the normal form) can be proportional to~$k^k$, because the
+\texttt{exp} function iterates an iteration of iterations, each with
+idependent depth limit~$k$. Note that the normal-form size blow-up may
+happen even if \texttt{exp} is never actually expected to be called
+with arguments that would result in exponential recursion depth.
+
+After defunctionalising, the depth limits will depend on each other --
+in \texttt{iterate} the calls via \texttt{app} to \texttt{plus} and
+\texttt{mult} will ensure a decreasing depth limit for them.
+
+\subsection{GEB encoding of higher-order functions}
+
+As far as I understand, GEB essentially encodes higher-order functions
+as field elements in a generic way (i.e., not depending on the
+particular program but encoding the entire lambda-term generically)
+and later essentially ``interprets'' them upon application (via the
+\texttt{eval} morphism associated with the exponential object). The
+difference with defunctionalisation seems to be that in
+defunctionalisation we just do a simple switch to choose between a
+finite number of functions that were present in the original program
+and compiled ``normally'', while when the entire lambda-term is
+encoded as a data structure all of it needs to be
+``interpreted''. This might be several orders of magnitude less
+efficient than defunctionalisation (depending on the notion of
+``efficiency'' relevant to the circuit model). At this point, I am
+unable to investigate this more thoroughly, because in its current
+state GEB fails to compile any programs using higher-order functions.
+
+This issue, however, will largely go away after GEB implements the
+planned use of higher-order VampIR functions.
+
+%\bibliography{ref.bib}
+
+\end{document}
