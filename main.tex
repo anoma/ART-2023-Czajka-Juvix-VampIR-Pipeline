@@ -1,23 +1,17 @@
-\documentclass[final]{msc}
+\documentclass[
+    9pt,            % 8-20pt possible
+    techreport,        % select between  ``techreport'', ``report'', ``article'', ``commun'', ``persp'' and ``review''
+    affiltop,       % switch, put affiliations under authors (instead of footnote)
+    % draft,          % for quick compilations (no figures, references etc)
+]{art}
 
-\input{preambule}
+\input{metadata.tex}
+\input{macros.tex}
+
 \begin{document}
-\input{metadata}
 
-\begin{abstract}
-  This report explores two alternatives to \Geb{} for \Juvix{}-to-\VampIR{}
-  compilation. The first alternative is a straightforward approach
-  based on full normalisation, which may be implemented relatively
-  quickly and used as a comparison baseline for all other
-  approaches. The second alternative is based on a pipeline of several
-  compiler transformations that together convert \Juvix{} programs into
-  a form that can be directly translated to \VampIR{} input.
-\end{abstract}
-
-\begin{keywords}
-Juvix; Vamp-IR; Geb; compilation; normalisation; arithmetic circuits
-\end{keywords}
 \maketitle
+\tableofcontents
 
 \section{Introduction}\label{sec_introduction}
 
@@ -415,6 +409,16 @@ We recommend the following.
   \end{itemize}
 \end{enumerate}
 
+
+\section*{Acknowledgements}
+
+The author expresses his gratitude to the organisers of the Valencia Heliax
+retreat 2023, where the possibility of direct compilation from Juvix to VampIR was discussed with Jonathan Prieto-Cubides and Murisi Turesenga. Jan Mas Rovira implemented let-hoisting used in the normalisation pipeline. Also, thanks to the entire \VampIR{} team for their ongoing support and updates during the implementation process. The \Geb{} team, in particular Terence Rokop, clarified many \Geb{}-related issues. Last but not least, special thanks to Jonathan Prieto-Cubides for reviewing this report and suggesting improvements.
+
+\nocite{*}
+\bibliography{ref.bib}
+
+\newpage
 \appendix
 
 \renewcommand{\thesection}{\Alph{section}}
@@ -831,13 +835,5 @@ unable to investigate this more thoroughly, because the \Geb{} implementation of
 
 However, this issue will mostly disappear after \Geb{} implements the
 planned optimisation of using higher-order \VampIR{} functions for \Geb{} higher-order functions. Since \VampIR{} higher-order functions are compile-time only, there are some situations where they cannot be used to implement \Geb{} higher-order functions. In such rare situations, the issue may persist.
-
-\section*{Acknowledgements}
-
-The author expresses his gratitude to the organisers of the Valencia Heliax
-retreat 2023, where the possibility of direct compilation from Juvix to VampIR was discussed with Jonathan Prieto-Cubides and Murisi Turesenga. Jan Mas Rovira implemented let-hoisting used in the normalisation pipeline. Also, thanks to the entire \VampIR{} team for their ongoing support and updates during the implementation process. The \Geb{} team, in particular Terence Rokop, clarified many \Geb{}-related issues. Last but not least, special thanks to Jonathan Prieto-Cubides for reviewing this report and suggesting improvements.
-
-\nocite{*}
-\bibliography{ref.bib}
 
 \end{document}
